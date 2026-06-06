@@ -637,6 +637,7 @@ def layout(scope: dict, title: str, body: str, active: str = "dashboard") -> byt
     nav = [
         ("dashboard", "/", "📊", "Dashboard"),
         ("influenciadores", "/influenciadores", "👤", "Influenciadores"),
+        ("cliques", "/cliques", "🖱️", "Todos os Cliques"),
         ("exportar", "/exportar", "📥", "Exportar CSV"),
     ]
     links = "".join(
@@ -696,6 +697,113 @@ def client_key(row: dict) -> str:
         return f"ip:{ip}|ua:{ua}"
     slug = str(row.get("slug") or "")
     return f"ua:{ua}|slug:{slug}"
+
+
+def build_sparkline_chart(clicks: list[dict], days: int = 30) -> str:
+    """Gera um SVG de área com cliques por dia nos últimos N dias."""
+    today = now_br().date()
+    date_labels = [(today - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+    counts_by_date: dict[str, int] = defaultdict(int)
+    for row in clicks:
+        d = row.get("_date", "")
+        if d in set(date_labels):
+            counts_by_date[d] += 1
+
+    values = [counts_by_date.get(d, 0) for d in date_labels]
+    max_val = max(values) if any(v > 0 for v in values) else 1
+    total_in_period = sum(values)
+
+    W, H, PAD_L, PAD_R, PAD_T, PAD_B = 800, 180, 44, 12, 16, 36
+    chart_w = W - PAD_L - PAD_R
+    chart_h = H - PAD_T - PAD_B
+    n = len(values)
+
+    def x_pos(i: int) -> float:
+        return PAD_L + (i / (n - 1)) * chart_w if n > 1 else PAD_L
+
+    def y_pos(v: float) -> float:
+        return PAD_T + chart_h - (v / max_val) * chart_h
+
+    # Linhas horizontais de guia (4 níveis)
+    guide_lines = ""
+    for level in [0.25, 0.5, 0.75, 1.0]:
+        y = y_pos(max_val * level)
+        label_val = int(max_val * level)
+        guide_lines += (
+            f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{W - PAD_R}" y2="{y:.1f}" '
+            f'stroke="rgba(255,255,255,.06)" stroke-width="1"/>'
+            f'<text x="{PAD_L - 6}" y="{y + 4:.1f}" text-anchor="end" '
+            f'fill="#7c8ba1" font-size="10" font-family="DM Sans,sans-serif">{label_val}</text>'
+        )
+
+    # Poly points para a área e a linha
+    pts = [(x_pos(i), y_pos(v)) for i, v in enumerate(values)]
+    line_pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area_pts = (
+        f"{PAD_L:.1f},{PAD_T + chart_h:.1f} "
+        + " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        + f" {W - PAD_R:.1f},{PAD_T + chart_h:.1f}"
+    )
+
+    # Labels de datas no eixo X (a cada ~7 dias)
+    x_labels = ""
+    step = max(1, n // 6)
+    for i in range(0, n, step):
+        x = x_pos(i)
+        d = date_labels[i]
+        parts = d.split("-")
+        label = f"{parts[2]}/{parts[1]}" if len(parts) == 3 else d
+        x_labels += (
+            f'<text x="{x:.1f}" y="{H - 6}" text-anchor="middle" '
+            f'fill="#7c8ba1" font-size="10" font-family="DM Sans,sans-serif">{label}</text>'
+        )
+
+    # Pontos de dados (somente onde há cliques)
+    dots = ""
+    for i, (x, y) in enumerate(pts):
+        if values[i] > 0:
+            dots += (
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="#5b8dee" '
+                f'stroke="rgba(4,8,15,.8)" stroke-width="2">'
+                f'<title>{date_labels[i]}: {values[i]} clique{"s" if values[i] != 1 else ""}</title>'
+                f'</circle>'
+            )
+
+    # Identificar pico
+    peak_idx = values.index(max_val)
+    peak_x, peak_y = pts[peak_idx]
+    peak_label = ""
+    if max_val > 0:
+        peak_label = (
+            f'<circle cx="{peak_x:.1f}" cy="{peak_y:.1f}" r="5" fill="#5b8dee" '
+            f'stroke="rgba(4,8,15,.9)" stroke-width="2"/>'
+            f'<text x="{peak_x:.1f}" y="{peak_y - 9:.1f}" text-anchor="middle" '
+            f'fill="#93b8f8" font-size="10" font-weight="700" font-family="DM Sans,sans-serif">{max_val}</text>'
+        )
+
+    subtitle = f"{total_in_period} cliques nos últimos {days} dias"
+
+    svg = f"""
+    <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.05em;text-transform:uppercase">Evolução diária</span>
+      <span style="font-size:12px;color:var(--muted)">{subtitle}</span>
+    </div>
+    <svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;overflow:visible">
+      <defs>
+        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#5b8dee" stop-opacity="0.25"/>
+          <stop offset="100%" stop-color="#5b8dee" stop-opacity="0.01"/>
+        </linearGradient>
+      </defs>
+      {guide_lines}
+      <polygon points="{area_pts}" fill="url(#areaGrad)"/>
+      <polyline points="{line_pts}" fill="none" stroke="#5b8dee" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      {dots}
+      {peak_label}
+      {x_labels}
+    </svg>
+    """
+    return svg
 
 
 def render_dashboard(scope: dict) -> bytes:
@@ -763,6 +871,8 @@ def render_dashboard(scope: dict) -> bytes:
     if clicks_error:
         alerts += f'<div class="alert error">Erro ao carregar cliques: {h(clicks_error)}</div>'
 
+    chart_svg = build_sparkline_chart(clicks, days=30)
+
     body = f"""
     <h1>Dashboard</h1>
     <div class="caption">Visão geral dos links, clientes e cliques dos influenciadores</div>
@@ -775,6 +885,11 @@ def render_dashboard(scope: dict) -> bytes:
       <div class="card metric"><div class="ico">🔗</div><div class="metric-body"><label>Influenciadores</label><b>{fmt_int(total_influencers)}</b><small>{fmt_int(active_influencers)} ativos</small></div></div>
     </div>
 
+    <div class="card section">
+      <h2>📈 Cliques por dia — últimos 30 dias</h2>
+      {chart_svg}
+    </div>
+
     <div class="two section">
       <div class="card">
         <h2>🏆 Ranking por cliques</h2>
@@ -784,13 +899,17 @@ def render_dashboard(scope: dict) -> bytes:
         <h2>⚡ Ações rápidas</h2>
         <p class="muted">Cadastre influenciadores e copie links rastreáveis que abrem o WhatsApp automaticamente.</p>
         <a class="btn" href="/influenciadores">👤 Gerenciar influenciadores</a>
+        <a class="btn secondary" href="/cliques">🖱️ Ver todos os cliques</a>
         <a class="btn secondary" href="/exportar">📥 Exportar relatórios</a>
       </div>
     </div>
 
     <div class="card section">
-      <h2>🕐 Atividade recente</h2>
-      <div class="table-wrap"><table><thead><tr><th>Data/Hora</th><th>Influenciador</th><th>IP</th><th>Navegador</th></tr></thead><tbody>{recent_rows}</tbody></table></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="margin:0">🕐 Atividade recente</h2>
+        <a class="btn sm secondary" href="/cliques">Ver tudo →</a>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Data/Hora</th><th>Influenciador</th><th>IP</th><th>Dispositivo</th></tr></thead><tbody>{recent_rows}</tbody></table></div>
     </div>
     """
     return layout(scope, APP_TITLE, body, active="dashboard")
@@ -955,7 +1074,159 @@ def render_influencers(scope: dict, qs: dict[str, list[str]]) -> bytes:
     return layout(scope, APP_TITLE, body, active="influenciadores")
 
 
-def render_export(scope: dict) -> bytes:
+def render_clicks(scope: dict, qs: dict[str, list[str]]) -> bytes:
+    influencers, _ = load_influencers()
+    inf_by_slug = {str(i.get("slug") or ""): i for i in influencers}
+    clicks_raw, error = load_clicks(limit=50000)
+    clicks = enrich_clicks(clicks_raw)
+
+    # ── Filtros recebidos via GET ──
+    f_slug   = first_param(qs, "slug").strip()
+    f_from   = first_param(qs, "de").strip()
+    f_to     = first_param(qs, "ate").strip()
+    f_device = first_param(qs, "device").strip()   # "mobile" | "desktop" | ""
+
+    # ── Aplicar filtros ──
+    filtered = clicks
+    if f_slug:
+        filtered = [r for r in filtered if str(r.get("slug") or "") == f_slug]
+    if f_from:
+        filtered = [r for r in filtered if r.get("_date", "") >= f_from]
+    if f_to:
+        filtered = [r for r in filtered if r.get("_date", "") <= f_to]
+    if f_device == "mobile":
+        def is_mobile(r: dict) -> bool:
+            ua = str(r.get("device_user_agent") or "").lower()
+            return "iphone" in ua or "android" in ua or "ipad" in ua
+        filtered = [r for r in filtered if is_mobile(r)]
+    elif f_device == "desktop":
+        def is_desktop(r: dict) -> bool:
+            ua = str(r.get("device_user_agent") or "").lower()
+            return "iphone" not in ua and "android" not in ua and "ipad" not in ua
+        filtered = [r for r in filtered if is_desktop(r)]
+
+    total_filtered = len(filtered)
+
+    # Monta lista de influenciadores para o select
+    influencer_options = '<option value="">Todos os influenciadores</option>'
+    for inf in sorted(influencers, key=lambda x: str(x.get("name") or "")):
+        sl = h(str(inf.get("slug") or ""))
+        nm = h(str(inf.get("name") or sl))
+        sel = 'selected' if sl == h(f_slug) else ''
+        influencer_options += f'<option value="{sl}" {sel}>{nm}</option>'
+
+    alert_html = ""
+    if error:
+        alert_html = f'<div class="alert error">Erro ao carregar cliques: {h(error)}</div>'
+
+    # Monta linhas da tabela (máx 500 exibidas)
+    rows_html = ""
+    page_limit = 500
+    shown = filtered[:page_limit]
+    for row in shown:
+        slug = str(row.get("slug") or "")
+        inf  = inf_by_slug.get(slug, {})
+        name = inf.get("name") or slug or "—"
+        photo_url = str(inf.get("photo_url") or "").strip()
+        raw_ua = str(row.get("device_user_agent") or "")
+        ip = str(row.get("ip_address") or "") or "—"
+        if photo_url:
+            av = (f'<img class="avatar-img" src="{h(photo_url)}" alt="{h(name)}" '
+                  f'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'inline-flex\'">'
+                  f'<span class="avatar" style="display:none">{h(get_initials(name))}</span>')
+        else:
+            av = f'<span class="avatar">{h(get_initials(name))}</span>'
+        rows_html += f"""
+        <tr>
+          <td style="white-space:nowrap;color:var(--muted);font-size:12.5px">{h(fmt_dt(row.get('created_at')))}</td>
+          <td>
+            <div class="influencer-cell">
+              {av}
+              <div class="influencer-cell-text">
+                <span class="influencer-cell-name">{h(name)}</span>
+                <span class="influencer-cell-handle">/go/{h(slug)}</span>
+              </div>
+            </div>
+          </td>
+          <td style="font-size:12px;color:var(--muted);font-family:monospace">{h(ip)}</td>
+          <td>{format_device_cell(raw_ua)}</td>
+        </tr>"""
+    if not rows_html:
+        rows_html = '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">Nenhum clique encontrado para este filtro.</td></tr>'
+
+    truncation_notice = ""
+    if total_filtered > page_limit:
+        truncation_notice = (
+            f'<div class="alert warn" style="margin-top:12px">'
+            f'Exibindo os {page_limit} registros mais recentes de {fmt_int(total_filtered)} encontrados. '
+            f'Use o filtro de datas para refinar ou exporte o CSV completo.</div>'
+        )
+
+    # Atalhos de período
+    today_iso = now_br().date().isoformat()
+    week_ago  = (now_br().date() - timedelta(days=6)).isoformat()
+    month_ago = (now_br().date() - timedelta(days=29)).isoformat()
+
+    body = f"""
+    <h1>Todos os Cliques</h1>
+    <div class="caption">Histórico completo de acessos com filtros por período, influenciador e tipo de dispositivo</div>
+    {alert_html}
+
+    <div class="card section" style="margin-top:0">
+      <form method="get" action="/cliques" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <div style="flex:1;min-width:180px">
+          <label>Influenciador</label>
+          <select name="slug">{influencer_options}</select>
+        </div>
+        <div style="min-width:140px">
+          <label>De</label>
+          <input type="date" name="de" value="{h(f_from)}" max="{today_iso}">
+        </div>
+        <div style="min-width:140px">
+          <label>Até</label>
+          <input type="date" name="ate" value="{h(f_to)}" max="{today_iso}">
+        </div>
+        <div style="min-width:140px">
+          <label>Dispositivo</label>
+          <select name="device">
+            <option value="" {'selected' if not f_device else ''}>Todos</option>
+            <option value="mobile" {'selected' if f_device == 'mobile' else ''}>📱 Mobile</option>
+            <option value="desktop" {'selected' if f_device == 'desktop' else ''}>💻 Desktop</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" type="submit">🔍 Filtrar</button>
+          <a class="btn secondary" href="/cliques">✕ Limpar</a>
+        </div>
+      </form>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+        <span style="font-size:12px;color:var(--muted);align-self:center;margin-right:4px">Atalhos:</span>
+        <a class="btn sm secondary" href="/cliques?de={today_iso}&ate={today_iso}">Hoje</a>
+        <a class="btn sm secondary" href="/cliques?de={week_ago}&ate={today_iso}">Últimos 7 dias</a>
+        <a class="btn sm secondary" href="/cliques?de={month_ago}&ate={today_iso}">Últimos 30 dias</a>
+        <a class="btn sm secondary" href="/export/cliques.csv" style="margin-left:auto">⬇️ Exportar CSV</a>
+      </div>
+    </div>
+
+    <div class="card section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="margin:0">🖱️ Cliques</h2>
+        <span style="font-size:13px;color:var(--muted)">{fmt_int(total_filtered)} registro{"s" if total_filtered != 1 else ""} encontrado{"s" if total_filtered != 1 else ""}</span>
+      </div>
+      {truncation_notice}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Data/Hora</th><th>Influenciador</th><th>IP</th><th>Dispositivo</th></tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+    </div>
+    """
+    return layout(scope, APP_TITLE, body, active="cliques")
+
+
+
     body = """
     <h1>Exportar CSV</h1>
     <div class="caption">Baixe os dados atuais da base para análise externa</div>
@@ -1063,6 +1334,10 @@ class InfluencerASGIApp:
 
             if method == "GET" and path == "/influenciadores":
                 await send_response(send, 200, render_influencers(scope, qs))
+                return
+
+            if method == "GET" and path == "/cliques":
+                await send_response(send, 200, render_clicks(scope, qs))
                 return
 
             if method == "GET" and path == "/exportar":
